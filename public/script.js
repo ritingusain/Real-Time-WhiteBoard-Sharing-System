@@ -25,6 +25,8 @@ let startY;
 let tool = 'pencil';
 let theme = 'dark';
 let snapshot = null;
+let rAF = null;
+let batch = [];
 
 function resizeCanvas() {
   canvas.width = 0.98 * window.innerWidth
@@ -70,6 +72,35 @@ form.addEventListener('submit', (e) => {
   socket.on('shape', (msg) => {
     drawRemoteShape(msg)
   })
+
+  socket.on('clear', () => {
+    ctx.clearRect(0, 0, canvas.width, canvas.height)
+  })
+
+  socket.on('init', (state) => {
+    if (!state) return
+    ctx.clearRect(0, 0, canvas.width, canvas.height)
+    // redraw strokes
+    if (Array.isArray(state.strokes)) {
+      state.strokes.forEach(stroke => {
+        ctx.save()
+        ctx.strokeStyle = stroke.color
+        ctx.lineWidth = Number(stroke.width)
+        ctx.beginPath()
+        if (Array.isArray(stroke.path) && stroke.path.length) {
+          ctx.moveTo(stroke.path[0].x, stroke.path[0].y)
+          for (let i = 1; i < stroke.path.length; i++) {
+            ctx.lineTo(stroke.path[i].x, stroke.path[i].y)
+          }
+          ctx.stroke()
+        }
+        ctx.restore()
+      })
+    }
+    if (Array.isArray(state.shapes)) {
+      state.shapes.forEach(s => drawRemoteShape(s))
+    }
+  })
 })
 
 canvas.onmousedown = (e) => {
@@ -100,6 +131,9 @@ canvas.onmouseup = () => {
     const msg = { tool, startX, startY, endX, endY, color: colorInput.value, width: Number(widthInput.value) }
     drawRemoteShape(msg)
     socket.emit('shape', msg)
+  } else if (mouseDown && tool === 'pencil') {
+    // finalize current pencil stroke into history
+    socket.emit('stroke', { color: colorInput.value, width: Number(widthInput.value), path: [] })
   }
   mouseDown = false
   snapshot = null
@@ -117,14 +151,29 @@ canvas.onmousemove = (e) => {
   y = e.clientY - rect.top
   if (!mouseDown) return
   if (tool === 'pencil') {
-    socket.emit('draw', { x, y })
-    ctx.lineTo(x, y)
-    ctx.stroke()
+    // batch points and render at most per frame
+    batch.push({ x, y })
+    if (!rAF) rAF = requestAnimationFrame(flushBatch)
   } else if (snapshot) {
     ctx.putImageData(snapshot, 0, 0)
     const preview = { tool, startX, startY, endX: x, endY: y, color: colorInput.value, width: Number(widthInput.value) }
     drawRemoteShape(preview)
   }
+}
+
+function flushBatch() {
+  rAF = null
+  if (batch.length === 0) return
+  const points = batch
+  batch = []
+  // draw locally
+  for (let i = 0; i < points.length; i++) {
+    ctx.lineTo(points[i].x, points[i].y)
+  }
+  ctx.stroke()
+  // send last point for realtime others
+  const last = points[points.length - 1]
+  socket.emit('draw', { x: last.x, y: last.y })
 }
 
 toolPencil.onclick = () => setTool('pencil')
@@ -134,6 +183,7 @@ toolCircle.onclick = () => setTool('circle')
 
 clearBtn.onclick = () => {
   ctx.clearRect(0, 0, canvas.width, canvas.height)
+  if (socket) socket.emit('clear')
 }
 
 themeBtn.onclick = () => {
@@ -174,3 +224,16 @@ function drawRemoteShape(msg) {
   }
   ctx.restore()
 }
+
+// Init sync: receive past state
+// strokes: array of { path:[{x,y}], color, width }
+// shapes: array of predefined shapes
+if (!window._initBound) {
+  window._initBound = true
+  document.addEventListener('DOMContentLoaded', () => {
+    // socket is created on submit; also bind after join below
+  })
+}
+
+// Bind after join as well
+// Insert after join acknowledgment
