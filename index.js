@@ -28,6 +28,11 @@ io.on('connection', (socket) => {
     rooms.forEach(room => socket.to(room).emit('ondown', { x: data.x, y: data.y }))
   })
 
+  socket.on('shape', (msg) => {
+    const rooms = [...socket.rooms].filter(r => r !== socket.id)
+    rooms.forEach(room => socket.to(room).emit('shape', msg))
+  })
+
   socket.on('disconnect', () => {
     console.log(`${socket.id} disconnected`)
   })
